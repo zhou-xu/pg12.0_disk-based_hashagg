@@ -28,6 +28,7 @@ disk-based hashagg commit时间线：
 2020-05-26	Jeff Davis	Avoid fragmentation of logical tapes when writing concurrently.
 2020-05-31	Tomas Vondra	Use CP_SMALL_TLIST for hash aggregate
 2020-06-09	Jeff Davis	Fix HashAgg regression from choosing too many initial buckets.
+2020-06-12	Jeff Davis	Rework HashAgg GUCs.
 2020-06-19	david-rowley	Fix EXPLAIN ANALYZE for parallel HashAgg plans.
 2020-07-01	david-rowley	Further adjustments to Hashagg EXPLAIN ANALYZE output
 2020-07-13	jeff-davis 		Revert "Use CP_SMALL_TLIST for hash aggregate"
