@@ -408,6 +408,7 @@ select array(select row(v.a,s1.*) from (select two,four, count(*) from onek grou
 -- test the knapsack
 
 set enable_indexscan = false;
+set hash_mem_multiplier = 1.0;
 set work_mem = '64kB';
 explain (costs off)
   select unique1,
@@ -508,6 +509,7 @@ group by cube (g1000, g100,g10);
 
 set enable_sort = true;
 set work_mem to default;
+set hash_mem_multiplier to default;
 
 -- Compare results
 
