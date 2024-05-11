@@ -1,0 +1,53 @@
+disk-based hashagg commit时间线：
+2019-08-02	Jeff Davis	Allow simplehash to use already-calculated hash values.
+2019-10-01	tvondra		Add transparent block-level memory accounting
+2019-10-04	tglsfdc		Allow repalloc() to give back space when a large chunk is downsized.
+2019-10-04	tvondra		Use Size instead of int64 to track allocated memory
+2019-10-06	tvondra		Change MemoryContextMemAllocated to return Size
+2019-12-17	tglsfdc		Fix "force_parallel_mode = regress" to work with ANALYZE + VERBOSE.
+2020-01-26	tglsfdc		Clean up EXPLAIN's handling of per-worker details.
+2020-02-07	Jeff Davis	Introduce TupleHashTableHash() and LookupTupleHashEntryHash().
+2020-02-07	Jeff Davis	Refactor hash_agg_entry_size().
+2020-02-07	anarazel	expression eval: Don't redundantly keep track of AggState.
+2020-02-11	jeff-davis	Change signature of TupleHashTableHash().
+2020-02-14	Jeff Davis	Logical Tape Set: lazily allocate read buffer.
+2020-02-19	Jeff Davis	Minor refactor of nodeAgg.c.
+2020-02-25	anarazel	expression eval: Reduce number of steps for agg transition invocations.
+2020-03-05	Jeff Davis	Extend ExecBuildAggTrans() to support a NULL pointer check.
+2020-03-09	Jeff Davis	Introduce LogicalTapeSetExtend().
+2020-03-18	Jeff Davis	Disk-based Hash Aggregation.
+2020-03-19	Jeff Davis	Specialize MemoryContextMemAllocated().
+2020-03-20	Jeff Davis	Revert "Specialize MemoryContextMemAllocated()."
+2020-03-23	Jeff Davis	Fixes for Disk-based Hash Aggregation.
+2020-03-24	Jeff Davis	Reduce test time for disk-based Hash Aggregation.
+2020-03-25	Jeff Davis	Consider disk-based hash aggregation to implement DISTINCT.
+2020-03-25	Jeff Davis	Avoid allocating unnecessary zero-sized array.
+2020-03-28	Jeff Davis	Fix costing for disk-based hash aggregation.
+2020-04-04	jeff-davis	Include chunk overhead in hash table entry size estimate.
+2020-04-08	jeff-davis	Create memory context for HashAgg with a reasonable maxBlockSize.
+2020-05-26	Jeff Davis	Avoid fragmentation of logical tapes when writing concurrently.
+2020-05-31	Tomas Vondra	Use CP_SMALL_TLIST for hash aggregate
+2020-06-09	Jeff Davis	Fix HashAgg regression from choosing too many initial buckets.
+2020-06-19	david-rowley	Fix EXPLAIN ANALYZE for parallel HashAgg plans.
+2020-07-01	david-rowley	Further adjustments to Hashagg EXPLAIN ANALYZE output
+2020-07-13	jeff-davis 		Revert "Use CP_SMALL_TLIST for hash aggregate"
+2020-07-13	jeff-davis 		HashAgg: before spilling tuples, set unneeded columns to NULL.
+2020-07-18	petergeoghegan		Rename "hash_mem" local variable.
+2020-07-27	jeff-davis 		Fix LookupTupleHashEntryHash() pipeline-stall issue.
+2020-07-28	Peter Geoghegan		Remove hashagg_avoid_disk_plan GUC.
+2020-07-28	Peter Geoghegan		Doc: Remove obsolete CREATE AGGREGATE note.
+2020-07-29	jeff-davis		HashAgg: use better cardinality estimate for recursive spilling.
+2020-07-29	Peter Geoghegan		Correct obsolete UNION hash aggs comment.
+2020-07-29	Peter Geoghegan		Rename another "hash_mem" local variable.
+2020-07-29	david-rowley	Make EXPLAIN ANALYZE of HashAgg more similar to Hash Join.
+2020-07-30	Peter Geoghegan		Add hash_mem_multiplier GUC.
+2020-09-16	jeff-davis	Change LogicalTapeSetBlocks() to use nBlocksWritten.
+2020-09-16	jeff-davis	HashAgg: release write buffers sooner by rewinding tape.
+2020-11-24	hlinnaka	Move per-agg and per-trans duplicate finding to the planner.
+2020-12-27	Jeff Davis	Fix bug #16784 in Disk-based Hash Aggregation.
+2021-02-05	tglsfdc		Fix bug in HashAgg's selective-column-spilling logic.
+2021-07-26	tglsfdc		Get rid of artificial restriction on hash table sizes on Windows.
+// 2021-08-30	Amit Kapila	Refactor sharedfileset.c to separate out fileset implementation.
+// 2021-10-18	hlinnaka	Refactor LogicalTapeSet/LogicalTape interface.
+2021-10-18	hlinnaka	Skip allocating hash table in EXPLAIN-only mode.
+2022-02-17	petergeoghegan	Increase hash_mem_multiplier default to 2.0.
