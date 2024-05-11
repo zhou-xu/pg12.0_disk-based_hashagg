@@ -4242,12 +4242,11 @@ consider_groupingsets_paths(PlannerInfo *root,
 											  dNumGroups - exclude_groups);
 
 		/*
-		 * If we have sortable columns to work with (gd->rollups is non-empty)
-		 * and enable_groupingsets_hash_disk is disabled, don't generate
-		 * hash-based paths that will exceed work_mem.
+		 * gd->rollups is empty if we have only unsortable columns to work
+		 * with.  Override work_mem in that case; otherwise, we'll rely on the
+		 * sorted-input case to generate usable mixed paths.
 		 */
-		if (!enable_groupingsets_hash_disk &&
-			hashsize > hash_mem_limit && gd->rollups)
+		if (hashsize > hash_mem_limit && gd->rollups)
 			return;				/* nope, won't fit */
 
 		/*
