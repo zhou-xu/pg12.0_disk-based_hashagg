@@ -88,6 +88,7 @@ llvm_compile_expr(ExprState *state)
 	/* state itself */
 	LLVMValueRef v_state;
 	LLVMValueRef v_econtext;
+	LLVMValueRef v_parent;
 
 	/* returnvalue */
 	LLVMValueRef v_isnullp;
@@ -177,6 +178,9 @@ llvm_compile_expr(ExprState *state)
 	v_tmpisnullp = LLVMBuildStructGEP(b, v_state,
 									  FIELDNO_EXPRSTATE_RESNULL,
 									  "v.state.resnull");
+	v_parent = l_load_struct_gep(b, v_state,
+								 FIELDNO_EXPRSTATE_PARENT,
+								 "v.state.parent");
 
 	/* build global slots */
 	v_scanslot = l_load_struct_gep(b, v_econtext,
@@ -1884,20 +1888,11 @@ llvm_compile_expr(ExprState *state)
 
 			case EEOP_AGGREF:
 				{
-					AggrefExprState *aggref = op->d.aggref.astate;
-					LLVMValueRef v_aggnop;
 					LLVMValueRef v_aggno;
 					LLVMValueRef value,
 								isnull;
 
-					/*
-					 * At this point aggref->aggno is not yet set (it's set up
-					 * in ExecInitAgg() after initializing the expression). So
-					 * load it from memory each time round.
-					 */
-					v_aggnop = l_ptr_const(&aggref->aggno,
-										   l_ptr(LLVMInt32Type()));
-					v_aggno = LLVMBuildLoad(b, v_aggnop, "v_aggno");
+					v_aggno = l_int32_const(op->d.aggref.aggno);
 
 					/* load agg value / null */
 					value = l_load_gep1(b, v_aggvalues, v_aggno, "aggvalue");
@@ -1995,7 +1990,7 @@ llvm_compile_expr(ExprState *state)
 					LLVMValueRef v_tmpcontext;
 					LLVMValueRef v_oldcontext;
 
-					aggstate = op->d.agg_deserialize.aggstate;
+					aggstate = castNode(AggState, state->parent);
 					fcinfo = op->d.agg_deserialize.fcinfo_data;
 
 					v_tmpcontext =
@@ -2083,155 +2078,51 @@ llvm_compile_expr(ExprState *state)
 					break;
 				}
 
-			case EEOP_AGG_INIT_TRANS:
+			case EEOP_AGG_PLAIN_PERGROUP_NULLCHECK:
 				{
-					AggState   *aggstate;
-					AggStatePerTrans pertrans;
+					int				 jumpnull;
+					LLVMValueRef	 v_aggstatep;
+					LLVMValueRef	 v_allpergroupsp;
+					LLVMValueRef	 v_pergroup_allaggs;
+					LLVMValueRef	 v_setoff;
 
-					LLVMValueRef v_aggstatep;
-					LLVMValueRef v_pertransp;
-
-					LLVMValueRef v_allpergroupsp;
-
-					LLVMValueRef v_pergroupp;
-
-					LLVMValueRef v_setoff,
-								v_transno;
-
-					LLVMValueRef v_notransvalue;
-
-					LLVMBasicBlockRef b_init;
-
-					aggstate = op->d.agg_init_trans.aggstate;
-					pertrans = op->d.agg_init_trans.pertrans;
-
-					v_aggstatep = l_ptr_const(aggstate,
-											  l_ptr(StructAggState));
-					v_pertransp = l_ptr_const(pertrans,
-											  l_ptr(StructAggStatePerTransData));
+					jumpnull = op->d.agg_plain_pergroup_nullcheck.jumpnull;
 
 					/*
-					 * pergroup = &aggstate->all_pergroups
-					 * [op->d.agg_init_trans_check.setoff]
-					 * [op->d.agg_init_trans_check.transno];
+					 * pergroup_allaggs = aggstate->all_pergroups
+					 * [op->d.agg_plain_pergroup_nullcheck.setoff];
 					 */
-					v_allpergroupsp =
-						l_load_struct_gep(b, v_aggstatep,
-										  FIELDNO_AGGSTATE_ALL_PERGROUPS,
-										  "aggstate.all_pergroups");
-					v_setoff = l_int32_const(op->d.agg_init_trans.setoff);
-					v_transno = l_int32_const(op->d.agg_init_trans.transno);
-					v_pergroupp =
-						LLVMBuildGEP(b,
-									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
-									 &v_transno, 1, "");
+					v_aggstatep = LLVMBuildBitCast(
+						b, v_parent, l_ptr(StructAggState), "");
 
-					v_notransvalue =
-						l_load_struct_gep(b, v_pergroupp,
-										  FIELDNO_AGGSTATEPERGROUPDATA_NOTRANSVALUE,
-										  "notransvalue");
+					v_allpergroupsp = l_load_struct_gep(
+						b, v_aggstatep,
+						FIELDNO_AGGSTATE_ALL_PERGROUPS,
+						"aggstate.all_pergroups");
 
-					b_init = l_bb_before_v(opblocks[i + 1],
-										   "op.%d.inittrans", i);
+					v_setoff = l_int32_const(
+						op->d.agg_plain_pergroup_nullcheck.setoff);
 
-					LLVMBuildCondBr(b,
-									LLVMBuildICmp(b, LLVMIntEQ, v_notransvalue,
-												  l_sbool_const(1), ""),
-									b_init,
-									opblocks[i + 1]);
+					v_pergroup_allaggs = l_load_gep1(
+						b, v_allpergroupsp, v_setoff, "");
 
-					LLVMPositionBuilderAtEnd(b, b_init);
-
-					{
-						LLVMValueRef params[3];
-						LLVMValueRef v_curaggcontext;
-						LLVMValueRef v_current_set;
-						LLVMValueRef v_aggcontext;
-
-						v_aggcontext = l_ptr_const(op->d.agg_init_trans.aggcontext,
-												   l_ptr(StructExprContext));
-
-						v_current_set =
-							LLVMBuildStructGEP(b,
-											   v_aggstatep,
-											   FIELDNO_AGGSTATE_CURRENT_SET,
-											   "aggstate.current_set");
-						v_curaggcontext =
-							LLVMBuildStructGEP(b,
-											   v_aggstatep,
-											   FIELDNO_AGGSTATE_CURAGGCONTEXT,
-											   "aggstate.curaggcontext");
-
-						LLVMBuildStore(b, l_int32_const(op->d.agg_init_trans.setno),
-									   v_current_set);
-						LLVMBuildStore(b, v_aggcontext,
-									   v_curaggcontext);
-
-						params[0] = v_aggstatep;
-						params[1] = v_pertransp;
-						params[2] = v_pergroupp;
-
-						LLVMBuildCall(b,
-									  llvm_get_decl(mod, FuncExecAggInitGroup),
-									  params, lengthof(params),
-									  "");
-					}
-					LLVMBuildBr(b, opblocks[op->d.agg_init_trans.jumpnull]);
-
+					LLVMBuildCondBr(
+						b,
+						LLVMBuildICmp(b, LLVMIntEQ,
+									  LLVMBuildPtrToInt(
+										  b, v_pergroup_allaggs, TypeSizeT, ""),
+									  l_sizet_const(0), ""),
+						opblocks[jumpnull],
+						opblocks[opno + 1]);
 					break;
 				}
 
-			case EEOP_AGG_STRICT_TRANS_CHECK:
-				{
-					AggState   *aggstate;
-					LLVMValueRef v_setoff,
-								v_transno;
-
-					LLVMValueRef v_aggstatep;
-					LLVMValueRef v_allpergroupsp;
-
-					LLVMValueRef v_transnull;
-					LLVMValueRef v_pergroupp;
-
-					int			jumpnull = op->d.agg_strict_trans_check.jumpnull;
-
-					aggstate = op->d.agg_strict_trans_check.aggstate;
-					v_aggstatep = l_ptr_const(aggstate, l_ptr(StructAggState));
-
-					/*
-					 * pergroup = &aggstate->all_pergroups
-					 * [op->d.agg_strict_trans_check.setoff]
-					 * [op->d.agg_init_trans_check.transno];
-					 */
-					v_allpergroupsp =
-						l_load_struct_gep(b, v_aggstatep,
-										  FIELDNO_AGGSTATE_ALL_PERGROUPS,
-										  "aggstate.all_pergroups");
-					v_setoff =
-						l_int32_const(op->d.agg_strict_trans_check.setoff);
-					v_transno =
-						l_int32_const(op->d.agg_strict_trans_check.transno);
-					v_pergroupp =
-						LLVMBuildGEP(b,
-									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
-									 &v_transno, 1, "");
-
-					v_transnull =
-						l_load_struct_gep(b, v_pergroupp,
-										  FIELDNO_AGGSTATEPERGROUPDATA_TRANSVALUEISNULL,
-										  "transnull");
-
-					LLVMBuildCondBr(b,
-									LLVMBuildICmp(b, LLVMIntEQ, v_transnull,
-												  l_sbool_const(1), ""),
-									opblocks[jumpnull],
-									opblocks[i + 1]);
-
-					break;
-				}
-
+			case EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL:
+			case EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL:
 			case EEOP_AGG_PLAIN_TRANS_BYVAL:
-			case EEOP_AGG_PLAIN_TRANS:
+			case EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF:
+			case EEOP_AGG_PLAIN_TRANS_STRICT_BYREF:
+			case EEOP_AGG_PLAIN_TRANS_BYREF:
 				{
 					AggState   *aggstate;
 					AggStatePerTrans pertrans;
@@ -2263,13 +2154,13 @@ llvm_compile_expr(ExprState *state)
 					LLVMValueRef v_tmpcontext;
 					LLVMValueRef v_oldcontext;
 
-					aggstate = op->d.agg_trans.aggstate;
+					aggstate = castNode(AggState, state->parent);
 					pertrans = op->d.agg_trans.pertrans;
 
 					fcinfo = pertrans->transfn_fcinfo;
 
-					v_aggstatep = l_ptr_const(aggstate,
-											  l_ptr(StructAggState));
+					v_aggstatep =
+						LLVMBuildBitCast(b, v_parent, l_ptr(StructAggState), "");
 					v_pertransp = l_ptr_const(pertrans,
 											  l_ptr(StructAggStatePerTransData));
 
@@ -2288,6 +2179,79 @@ llvm_compile_expr(ExprState *state)
 						LLVMBuildGEP(b,
 									 l_load_gep1(b, v_allpergroupsp, v_setoff, ""),
 									 &v_transno, 1, "");
+
+					if (opcode == EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL ||
+						opcode == EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF)
+					{
+						LLVMValueRef v_notransvalue;
+						LLVMBasicBlockRef b_init;
+						LLVMBasicBlockRef b_no_init;
+
+						v_notransvalue =
+							l_load_struct_gep(b, v_pergroupp,
+											  FIELDNO_AGGSTATEPERGROUPDATA_NOTRANSVALUE,
+											  "notransvalue");
+
+						b_init = l_bb_before_v(opblocks[opno + 1],
+											   "op.%d.inittrans", opno);
+						b_no_init = l_bb_before_v(opblocks[opno + 1],
+												  "op.%d.no_inittrans", opno);
+
+						LLVMBuildCondBr(b,
+										LLVMBuildICmp(b, LLVMIntEQ, v_notransvalue,
+													  l_sbool_const(1), ""),
+										b_init,
+										b_no_init);
+
+						/* block to init the transition value if necessary */
+						{
+							LLVMValueRef params[4];
+
+							LLVMPositionBuilderAtEnd(b, b_init);
+
+							v_aggcontext = l_ptr_const(op->d.agg_trans.aggcontext,
+													   l_ptr(StructExprContext));
+
+							params[0] = v_aggstatep;
+							params[1] = v_pertransp;
+							params[2] = v_pergroupp;
+							params[3] = v_aggcontext;
+
+							LLVMBuildCall(b,
+										  llvm_pg_func(mod, "ExecAggInitGroup"),
+										  params, lengthof(params),
+										  "");
+
+							LLVMBuildBr(b, opblocks[opno + 1]);
+
+						}
+
+						LLVMPositionBuilderAtEnd(b, b_no_init);
+					}
+
+					if (opcode == EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYVAL ||
+						opcode == EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF ||
+						opcode == EEOP_AGG_PLAIN_TRANS_STRICT_BYVAL ||
+						opcode == EEOP_AGG_PLAIN_TRANS_STRICT_BYREF)
+					{
+						LLVMValueRef v_transnull;
+						LLVMBasicBlockRef b_strictpass;
+
+						b_strictpass = l_bb_before_v(opblocks[opno + 1],
+													 "op.%d.strictpass", opno);
+						v_transnull =
+							l_load_struct_gep(b, v_pergroupp,
+											  FIELDNO_AGGSTATEPERGROUPDATA_TRANSVALUEISNULL,
+											  "transnull");
+
+						LLVMBuildCondBr(b,
+										LLVMBuildICmp(b, LLVMIntEQ, v_transnull,
+													  l_sbool_const(1), ""),
+										opblocks[opno + 1],
+										b_strictpass);
+
+						LLVMPositionBuilderAtEnd(b, b_strictpass);
+					}
 
 					v_fcinfo = l_ptr_const(fcinfo,
 										   l_ptr(StructFunctionCallInfoData));
@@ -2352,7 +2316,9 @@ llvm_compile_expr(ExprState *state)
 					 * child of the aggcontext, assume we can adopt that value
 					 * without copying it.
 					 */
-					if (opcode == EEOP_AGG_PLAIN_TRANS)
+					if (opcode == EEOP_AGG_PLAIN_TRANS_INIT_STRICT_BYREF ||
+						opcode == EEOP_AGG_PLAIN_TRANS_STRICT_BYREF ||
+						opcode == EEOP_AGG_PLAIN_TRANS_BYREF)
 					{
 						LLVMBasicBlockRef b_call;
 						LLVMBasicBlockRef b_nocall;

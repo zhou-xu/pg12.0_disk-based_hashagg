@@ -941,11 +941,10 @@ make_union_unique(SetOperationStmt *op, Path *path, List *tlist,
 
 	/*
 	 * XXX for the moment, take the number of distinct groups as equal to the
-	 * total input size, ie, the worst case.  This is too conservative, but we
-	 * don't want to risk having the hashtable overrun memory; also, it's not
-	 * clear how to get a decent estimate of the true size.  One should note
-	 * as well the propensity of novices to write UNION rather than UNION ALL
-	 * even when they don't expect any duplicates...
+	 * total input size, ie, the worst case.  This is too conservative, but
+	 * it's not clear how to get a decent estimate of the true size.  One
+	 * should note as well the propensity of novices to write UNION rather
+	 * than UNION ALL even when they don't expect any duplicates...
 	 */
 	dNumGroups = path->rows;
 
@@ -1016,6 +1015,7 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
 					const char *construct)
 {
 	int			numGroupCols = list_length(groupClauses);
+	Size		hash_mem_limit = get_hash_memory_limit();
 	bool		can_sort;
 	bool		can_hash;
 	Size		hashentrysize;
@@ -1047,11 +1047,11 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
 
 	/*
 	 * Don't do it if it doesn't look like the hashtable will fit into
-	 * work_mem.
+	 * hash_mem.
 	 */
 	hashentrysize = MAXALIGN(input_path->pathtarget->width) + MAXALIGN(SizeofMinimalTupleHeader);
 
-	if (hashentrysize * dNumGroups > work_mem * 1024L)
+	if (hashentrysize * dNumGroups > hash_mem_limit)
 		return false;
 
 	/*
@@ -1069,7 +1069,7 @@ choose_hashed_setop(PlannerInfo *root, List *groupClauses,
 			 numGroupCols, dNumGroups,
 			 NIL,
 			 input_path->startup_cost, input_path->total_cost,
-			 input_path->rows);
+			 input_path->rows, input_path->pathtarget->width);
 
 	/*
 	 * Now for the sorted case.  Note that the input is *always* unsorted,

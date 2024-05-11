@@ -138,7 +138,12 @@ extern TupleHashTable BuildTupleHashTableExt(PlanState *parent,
 											 MemoryContext tempcxt, bool use_variable_hash_iv);
 extern TupleHashEntry LookupTupleHashEntry(TupleHashTable hashtable,
 										   TupleTableSlot *slot,
-										   bool *isnew);
+										   bool *isnew, uint32 *hash);
+extern uint32 TupleHashTableHash(TupleHashTable hashtable,
+								 TupleTableSlot *slot);
+extern TupleHashEntry LookupTupleHashEntryHash(TupleHashTable hashtable,
+											   TupleTableSlot *slot,
+											   bool *isnew, uint32 hash);
 extern TupleHashEntry FindTupleHashEntry(TupleHashTable hashtable,
 										 TupleTableSlot *slot,
 										 ExprState *eqcomp,
@@ -249,7 +254,7 @@ extern ExprState *ExecInitQual(List *qual, PlanState *parent);
 extern ExprState *ExecInitCheck(List *qual, PlanState *parent);
 extern List *ExecInitExprList(List *nodes, PlanState *parent);
 extern ExprState *ExecBuildAggTrans(AggState *aggstate, struct AggStatePerPhaseData *phase,
-									bool doSort, bool doHash);
+									bool doSort, bool doHash, bool nullcheck);
 extern ExprState *ExecBuildGroupingEqual(TupleDesc ldesc, TupleDesc rdesc,
 										 const TupleTableSlotOps *lops, const TupleTableSlotOps *rops,
 										 int numCols,
@@ -487,6 +492,7 @@ extern void end_tup_output(TupOutputState *tstate);
 extern EState *CreateExecutorState(void);
 extern void FreeExecutorState(EState *estate);
 extern ExprContext *CreateExprContext(EState *estate);
+extern ExprContext *CreateWorkExprContext(EState *estate);
 extern ExprContext *CreateStandaloneExprContext(void);
 extern void FreeExprContext(ExprContext *econtext, bool isCommit);
 extern void ReScanExprContext(ExprContext *econtext);

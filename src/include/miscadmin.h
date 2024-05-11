@@ -243,6 +243,7 @@ extern PGDLLIMPORT int IntervalStyle;
 extern bool enableFsync;
 extern PGDLLIMPORT bool allowSystemTableMods;
 extern PGDLLIMPORT int work_mem;
+extern PGDLLIMPORT double hash_mem_multiplier;
 extern PGDLLIMPORT int maintenance_work_mem;
 extern PGDLLIMPORT int max_parallel_maintenance_workers;
 
@@ -450,5 +451,8 @@ extern bool has_rolreplication(Oid roleid);
 /* in access/transam/xlog.c */
 extern bool BackupInProgress(void);
 extern void CancelBackup(void);
+
+/* in executor/nodeHash.c */
+extern size_t get_hash_memory_limit(void);
 
 #endif							/* MISCADMIN_H */

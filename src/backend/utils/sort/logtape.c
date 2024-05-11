@@ -114,6 +114,18 @@ typedef struct TapeBlockTrailer
 #define TapeBlockSetNBytes(buf, nbytes) \
 	(TapeBlockGetTrailer(buf)->next = -(nbytes))
 
+/*
+ * When multiple tapes are being written to concurrently (as in HashAgg),
+ * avoid excessive fragmentation by preallocating block numbers to individual
+ * tapes. Each preallocation doubles in size starting at
+ * TAPE_WRITE_PREALLOC_MIN blocks up to TAPE_WRITE_PREALLOC_MAX blocks.
+ *
+ * No filesystem operations are performed for preallocation; only the block
+ * numbers are reserved. This may lead to sparse writes, which will cause
+ * ltsWriteBlock() to fill in holes with zeros.
+ */
+#define TAPE_WRITE_PREALLOC_MIN 8
+#define TAPE_WRITE_PREALLOC_MAX 128
 
 /*
  * This data structure represents a single "logical tape" within the set
@@ -155,6 +167,15 @@ typedef struct LogicalTape
 	int			max_size;		/* highest useful, safe buffer_size */
 	int			pos;			/* next read/write position in buffer */
 	int			nbytes;			/* total # of valid bytes in buffer */
+
+	/*
+	 * Preallocated block numbers are held in an array sorted in descending
+	 * order; blocks are consumed from the end of the array (lowest block
+	 * numbers first).
+	 */
+	long	   *prealloc;
+	int		 	nprealloc;		/* number of elements in list */
+	int			prealloc_size;	/* number of elements list can hold */
 } LogicalTape;
 
 /*
@@ -201,16 +222,19 @@ struct LogicalTapeSet
 	int			freeBlocksLen;	/* current allocated length of freeBlocks[] */
 
 	/* The array of logical tapes. */
-	int			nTapes;			/* # of logical tapes in set */
-	LogicalTape tapes[FLEXIBLE_ARRAY_MEMBER];	/* has nTapes nentries */
+	int				nTapes;	/* # of logical tapes in set */
+	LogicalTape	   *tapes;	/* has nTapes nentries */
 };
 
 static void ltsWriteBlock(LogicalTapeSet *lts, long blocknum, void *buffer);
 static void ltsReadBlock(LogicalTapeSet *lts, long blocknum, void *buffer);
 static long ltsGetFreeBlock(LogicalTapeSet *lts);
+static long ltsGetPreallocBlock(LogicalTapeSet *lts, LogicalTape *lt);
 static void ltsReleaseBlock(LogicalTapeSet *lts, long blocknum);
 static void ltsConcatWorkerTapes(LogicalTapeSet *lts, TapeShare *shared,
 								 SharedFileSet *fileset);
+static void ltsInitTape(LogicalTape *lt);
+static void ltsInitReadBuffer(LogicalTapeSet *lts, LogicalTape *lt);
 
 
 /*
@@ -364,6 +388,45 @@ ltsGetFreeBlock(LogicalTapeSet *lts)
 }
 
 /*
+ * Return the lowest free block number from the tape's preallocation list.
+ * Refill the preallocation list if necessary.
+ */
+static long
+ltsGetPreallocBlock(LogicalTapeSet *lts, LogicalTape *lt)
+{
+	/* sorted in descending order, so return the last element */
+	if (lt->nprealloc > 0)
+		return lt->prealloc[--lt->nprealloc];
+
+	if (lt->prealloc == NULL)
+	{
+		lt->prealloc_size = TAPE_WRITE_PREALLOC_MIN;
+		lt->prealloc = (long *) palloc(sizeof(long) * lt->prealloc_size);
+	}
+	else if (lt->prealloc_size < TAPE_WRITE_PREALLOC_MAX)
+	{
+		/* when the preallocation list runs out, double the size */
+		lt->prealloc_size *= 2;
+		if (lt->prealloc_size > TAPE_WRITE_PREALLOC_MAX)
+			lt->prealloc_size = TAPE_WRITE_PREALLOC_MAX;
+		lt->prealloc = (long *) repalloc(lt->prealloc,
+										 sizeof(long) * lt->prealloc_size);
+	}
+
+	/* refill preallocation list */
+	lt->nprealloc = lt->prealloc_size;
+	for (int i = lt->nprealloc; i > 0; i--)
+	{
+		lt->prealloc[i - 1] = ltsGetFreeBlock(lts);
+
+		/* verify descending order */
+		Assert(i == lt->nprealloc || lt->prealloc[i - 1] > lt->prealloc[i]);
+	}
+
+	return lt->prealloc[--lt->nprealloc];
+}
+
+/*
  * Return a block# to the freelist.
  */
 static void
@@ -487,6 +550,51 @@ ltsConcatWorkerTapes(LogicalTapeSet *lts, TapeShare *shared,
 }
 
 /*
+ * Initialize per-tape struct.  Note we allocate the I/O buffer lazily.
+ */
+static void
+ltsInitTape(LogicalTape *lt)
+{
+	lt->writing           = true;
+	lt->frozen            = false;
+	lt->dirty             = false;
+	lt->firstBlockNumber  = -1L;
+	lt->curBlockNumber    = -1L;
+	lt->nextBlockNumber   = -1L;
+	lt->offsetBlockNumber = 0L;
+	lt->buffer            = NULL;
+	lt->buffer_size       = 0;
+	/* palloc() larger than MaxAllocSize would fail */
+	lt->max_size          = MaxAllocSize;
+	lt->pos               = 0;
+	lt->nbytes            = 0;
+	lt->prealloc          = NULL;
+	lt->nprealloc         = 0;
+	lt->prealloc_size     = 0;
+}
+
+/*
+ * Lazily allocate and initialize the read buffer. This avoids waste when many
+ * tapes are open at once, but not all are active between rewinding and
+ * reading.
+ */
+static void
+ltsInitReadBuffer(LogicalTapeSet *lts, LogicalTape *lt)
+{
+	if (lt->firstBlockNumber != -1L)
+	{
+		Assert(lt->buffer_size > 0);
+		lt->buffer = palloc(lt->buffer_size);
+	}
+
+	/* Read the first block, or reset if tape is empty */
+	lt->nextBlockNumber = lt->firstBlockNumber;
+	lt->pos = 0;
+	lt->nbytes = 0;
+	ltsReadFillBuffer(lts, lt);
+}
+
+/*
  * Create a set of logical tapes in a temporary underlying file.
  *
  * Each tape is initialized in write state.  Serial callers pass ntapes,
@@ -511,15 +619,13 @@ LogicalTapeSetCreate(int ntapes, TapeShare *shared, SharedFileSet *fileset,
 					 int worker)
 {
 	LogicalTapeSet *lts;
-	LogicalTape *lt;
 	int			i;
 
 	/*
 	 * Create top-level struct including per-tape LogicalTape structs.
 	 */
 	Assert(ntapes > 0);
-	lts = (LogicalTapeSet *) palloc(offsetof(LogicalTapeSet, tapes) +
-									ntapes * sizeof(LogicalTape));
+	lts = (LogicalTapeSet *) palloc(sizeof(LogicalTapeSet));
 	lts->nBlocksAllocated = 0L;
 	lts->nBlocksWritten = 0L;
 	lts->nHoleBlocks = 0L;
@@ -529,30 +635,10 @@ LogicalTapeSetCreate(int ntapes, TapeShare *shared, SharedFileSet *fileset,
 	lts->freeBlocks = (long *) palloc(lts->freeBlocksLen * sizeof(long));
 	lts->nFreeBlocks = 0;
 	lts->nTapes = ntapes;
+	lts->tapes = (LogicalTape *) palloc(ntapes * sizeof(LogicalTape));
 
-	/*
-	 * Initialize per-tape structs.  Note we allocate the I/O buffer and the
-	 * first block for a tape only when it is first actually written to.  This
-	 * avoids wasting memory space when tuplesort.c overestimates the number
-	 * of tapes needed.
-	 */
 	for (i = 0; i < ntapes; i++)
-	{
-		lt = &lts->tapes[i];
-		lt->writing = true;
-		lt->frozen = false;
-		lt->dirty = false;
-		lt->firstBlockNumber = -1L;
-		lt->curBlockNumber = -1L;
-		lt->nextBlockNumber = -1L;
-		lt->offsetBlockNumber = 0L;
-		lt->buffer = NULL;
-		lt->buffer_size = 0;
-		/* palloc() larger than MaxAllocSize would fail */
-		lt->max_size = MaxAllocSize;
-		lt->pos = 0;
-		lt->nbytes = 0;
-	}
+		ltsInitTape(&lts->tapes[i]);
 
 	/*
 	 * Create temp BufFile storage as required.
@@ -640,7 +726,7 @@ LogicalTapeWrite(LogicalTapeSet *lts, int tapenum,
 		Assert(lt->firstBlockNumber == -1);
 		Assert(lt->pos == 0);
 
-		lt->curBlockNumber = ltsGetFreeBlock(lts);
+		lt->curBlockNumber = ltsGetPreallocBlock(lts, lt);
 		lt->firstBlockNumber = lt->curBlockNumber;
 
 		TapeBlockGetTrailer(lt->buffer)->prev = -1L;
@@ -664,7 +750,7 @@ LogicalTapeWrite(LogicalTapeSet *lts, int tapenum,
 			 * First allocate the next block, so that we can store it in the
 			 * 'next' pointer of this block.
 			 */
-			nextBlockNumber = ltsGetFreeBlock(lts);
+			nextBlockNumber = ltsGetPreallocBlock(lts, lt);
 
 			/* set the next-pointer and dump the current block. */
 			TapeBlockGetTrailer(lt->buffer)->next = nextBlockNumber;
@@ -766,22 +852,26 @@ LogicalTapeRewindForRead(LogicalTapeSet *lts, int tapenum, size_t buffer_size)
 		Assert(lt->frozen);
 	}
 
-	/* Allocate a read buffer (unless the tape is empty) */
 	if (lt->buffer)
 		pfree(lt->buffer);
 	lt->buffer = NULL;
 	lt->buffer_size = 0;
 	if (lt->firstBlockNumber != -1L)
 	{
-		lt->buffer = palloc(buffer_size);
+		/* the buffer is lazily allocated, but set the size here */
 		lt->buffer_size = buffer_size;
-	}
 
-	/* Read the first block, or reset if tape is empty */
-	lt->nextBlockNumber = lt->firstBlockNumber;
-	lt->pos = 0;
-	lt->nbytes = 0;
-	ltsReadFillBuffer(lts, lt);
+		/* free the preallocation list, and return unused block numbers */
+		if (lt->prealloc != NULL)
+		{
+			for (int i = lt->nprealloc; i > 0; i--)
+				ltsReleaseBlock(lts, lt->prealloc[i - 1]);
+			pfree(lt->prealloc);
+			lt->prealloc = NULL;
+			lt->nprealloc = 0;
+			lt->prealloc_size = 0;
+		}
+	}
 }
 
 /*
@@ -829,6 +919,9 @@ LogicalTapeRead(LogicalTapeSet *lts, int tapenum,
 	Assert(tapenum >= 0 && tapenum < lts->nTapes);
 	lt = &lts->tapes[tapenum];
 	Assert(!lt->writing);
+
+	if (lt->buffer == NULL)
+		ltsInitReadBuffer(lts, lt);
 
 	while (size > 0)
 	{
@@ -944,6 +1037,25 @@ LogicalTapeFreeze(LogicalTapeSet *lts, int tapenum, TapeShare *share)
 }
 
 /*
+ * Add additional tapes to this tape set. Not intended to be used when any
+ * tapes are frozen.
+ */
+void
+LogicalTapeSetExtend(LogicalTapeSet *lts, int nAdditional)
+{
+	int     i;
+	int		nTapesOrig = lts->nTapes;
+
+	lts->nTapes += nAdditional;
+
+	lts->tapes = (LogicalTape *) repalloc(
+		lts->tapes, lts->nTapes * sizeof(LogicalTape));
+
+	for (i = nTapesOrig; i < lts->nTapes; i++)
+		ltsInitTape(&lts->tapes[i]);
+}
+
+/*
  * Backspace the tape a given number of bytes.  (We also support a more
  * general seek interface, see below.)
  *
@@ -966,6 +1078,9 @@ LogicalTapeBackspace(LogicalTapeSet *lts, int tapenum, size_t size)
 	lt = &lts->tapes[tapenum];
 	Assert(lt->frozen);
 	Assert(lt->buffer_size == BLCKSZ);
+
+	if (lt->buffer == NULL)
+		ltsInitReadBuffer(lts, lt);
 
 	/*
 	 * Easy case for seek within current block.
@@ -1039,6 +1154,9 @@ LogicalTapeSeek(LogicalTapeSet *lts, int tapenum,
 	Assert(offset >= 0 && offset <= TapeBlockPayloadSize);
 	Assert(lt->buffer_size == BLCKSZ);
 
+	if (lt->buffer == NULL)
+		ltsInitReadBuffer(lts, lt);
+
 	if (blocknum != lt->curBlockNumber)
 	{
 		ltsReadBlock(lts, blocknum, (void *) lt->buffer);
@@ -1066,6 +1184,10 @@ LogicalTapeTell(LogicalTapeSet *lts, int tapenum,
 
 	Assert(tapenum >= 0 && tapenum < lts->nTapes);
 	lt = &lts->tapes[tapenum];
+
+	if (lt->buffer == NULL)
+		ltsInitReadBuffer(lts, lt);
+
 	Assert(lt->offsetBlockNumber == 0L);
 
 	/* With a larger buffer, 'pos' wouldn't be the same as offset within page */
@@ -1077,9 +1199,19 @@ LogicalTapeTell(LogicalTapeSet *lts, int tapenum,
 
 /*
  * Obtain total disk space currently used by a LogicalTapeSet, in blocks.
+ *
+ * This should not be called while there are open write buffers; otherwise it
+ * may not account for buffered data.
  */
 long
 LogicalTapeSetBlocks(LogicalTapeSet *lts)
 {
-	return lts->nBlocksAllocated - lts->nHoleBlocks;
+#ifdef USE_ASSERT_CHECKING
+	for (int i = 0; i < lts->nTapes; i++)
+	{
+		LogicalTape *lt = &lts->tapes[i];
+		Assert(!lt->writing || lt->buffer == NULL);
+	}
+#endif
+	return lts->nBlocksWritten - lts->nHoleBlocks;
 }

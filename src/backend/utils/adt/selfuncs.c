@@ -3527,19 +3527,14 @@ estimate_hash_bucket_stats(PlannerInfo *root, Node *hashkey, double nbuckets,
  * won't store them.  Is this a problem?
  */
 double
-estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
-						   double dNumGroups)
+estimate_hashagg_tablesize(PlannerInfo *root, Path *path,
+						   const AggClauseCosts *agg_costs, double dNumGroups)
 {
 	Size		hashentrysize;
 
-	/* Estimate per-hash-entry space at tuple width... */
-	hashentrysize = MAXALIGN(path->pathtarget->width) +
-		MAXALIGN(SizeofMinimalTupleHeader);
-
-	/* plus space for pass-by-ref transition values... */
-	hashentrysize += agg_costs->transitionSpace;
-	/* plus the per-hash-entry overhead */
-	hashentrysize += hash_agg_entry_size(agg_costs->numAggs);
+	hashentrysize = hash_agg_entry_size(list_length(root->aggtransinfos),
+										path->pathtarget->width,
+										agg_costs->transitionSpace);
 
 	/*
 	 * Note that this disregards the effect of fill-factor and growth policy

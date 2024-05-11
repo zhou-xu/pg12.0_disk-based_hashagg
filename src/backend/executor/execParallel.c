@@ -25,6 +25,7 @@
 
 #include "executor/execParallel.h"
 #include "executor/executor.h"
+#include "executor/nodeAgg.h"
 #include "executor/nodeAppend.h"
 #include "executor/nodeBitmapHeapscan.h"
 #include "executor/nodeCustom.h"
@@ -280,7 +281,10 @@ ExecParallelEstimate(PlanState *planstate, ExecParallelEstimateContext *e)
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecSortEstimate((SortState *) planstate, e->pcxt);
 			break;
-
+		case T_AggState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecAggEstimate((AggState *) planstate, e->pcxt);
+			break;
 		default:
 			break;
 	}
@@ -493,7 +497,10 @@ ExecParallelInitializeDSM(PlanState *planstate,
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecSortInitializeDSM((SortState *) planstate, d->pcxt);
 			break;
-
+		case T_AggState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecAggInitializeDSM((AggState *) planstate, d->pcxt);
+			break;
 		default:
 			break;
 	}
@@ -1018,6 +1025,9 @@ ExecParallelRetrieveInstrumentation(PlanState *planstate,
 		case T_HashState:
 			ExecHashRetrieveInstrumentation((HashState *) planstate);
 			break;
+		case T_AggState:
+			ExecAggRetrieveInstrumentation((AggState *) planstate);
+			break;
 		default:
 			break;
 	}
@@ -1301,7 +1311,10 @@ ExecParallelInitializeWorker(PlanState *planstate, ParallelWorkerContext *pwcxt)
 			/* even when not parallel-aware, for EXPLAIN ANALYZE */
 			ExecSortInitializeWorker((SortState *) planstate, pwcxt);
 			break;
-
+		case T_AggState:
+			/* even when not parallel-aware, for EXPLAIN ANALYZE */
+			ExecAggInitializeWorker((AggState *) planstate, pwcxt);
+			break;
 		default:
 			break;
 	}

@@ -77,6 +77,7 @@
 #include "access/htup_details.h"
 #include "access/tsmapi.h"
 #include "executor/executor.h"
+#include "executor/nodeAgg.h"
 #include "executor/nodeHash.h"
 #include "miscadmin.h"
 #include "nodes/makefuncs.h"
@@ -128,6 +129,8 @@ bool		enable_bitmapscan = true;
 bool		enable_tidscan = true;
 bool		enable_sort = true;
 bool		enable_hashagg = true;
+bool		enable_hashagg_disk = true;
+bool		enable_groupingsets_hash_disk = false;
 bool		enable_nestloop = true;
 bool		enable_material = true;
 bool		enable_mergejoin = true;
@@ -2153,7 +2156,7 @@ cost_agg(Path *path, PlannerInfo *root,
 		 int numGroupCols, double numGroups,
 		 List *quals,
 		 Cost input_startup_cost, Cost input_total_cost,
-		 double input_tuples)
+		 double input_tuples, double input_width)
 {
 	double		output_tuples;
 	Cost		startup_cost;
@@ -2228,12 +2231,76 @@ cost_agg(Path *path, PlannerInfo *root,
 			startup_cost += disable_cost;
 		startup_cost += aggcosts->transCost.startup;
 		startup_cost += aggcosts->transCost.per_tuple * input_tuples;
+		/* cost of computing hash value */
 		startup_cost += (cpu_operator_cost * numGroupCols) * input_tuples;
 		startup_cost += aggcosts->finalCost.startup;
 		total_cost = startup_cost;
 		total_cost += aggcosts->finalCost.per_tuple * numGroups;
+		/* cost of retrieving from hash table */
 		total_cost += cpu_tuple_cost * numGroups;
 		output_tuples = numGroups;
+	}
+
+	/*
+	 * Add the disk costs of hash aggregation that spills to disk.
+	 *
+	 * Groups that go into the hash table stay in memory until finalized,
+	 * so spilling and reprocessing tuples doesn't incur additional
+	 * invocations of transCost or finalCost. Furthermore, the computed
+	 * hash value is stored with the spilled tuples, so we don't incur
+	 * extra invocations of the hash function.
+	 *
+	 * Hash Agg begins returning tuples after the first batch is
+	 * complete. Accrue writes (spilled tuples) to startup_cost and to
+	 * total_cost; accrue reads only to total_cost.
+	 */
+	if (aggstrategy == AGG_HASHED || aggstrategy == AGG_MIXED)
+	{
+		double	pages;
+		double	pages_written = 0.0;
+		double	pages_read	  = 0.0;
+		double	hashentrysize;
+		double	nbatches;
+		Size	mem_limit;
+		uint64	ngroups_limit;
+		int		num_partitions;
+		int		depth;
+
+
+		/*
+		 * Estimate number of batches based on the computed limits. If less
+		 * than or equal to one, all groups are expected to fit in memory;
+		 * otherwise we expect to spill.
+		 */
+		hashentrysize = hash_agg_entry_size(list_length(root->aggtransinfos),
+											input_width,
+											aggcosts->transitionSpace);
+		hash_agg_set_limits(hashentrysize, numGroups, 0, &mem_limit,
+							&ngroups_limit, &num_partitions);
+
+		nbatches = Max( (numGroups * hashentrysize) / mem_limit,
+						numGroups / ngroups_limit );
+
+		nbatches = Max(ceil(nbatches), 1.0);
+		num_partitions = Max(num_partitions, 2);
+
+		/*
+		 * The number of partitions can change at different levels of
+		 * recursion; but for the purposes of this calculation assume it stays
+		 * constant.
+		 */
+		depth = ceil( log(nbatches) / log(num_partitions) );
+
+		/*
+		 * Estimate number of pages read and written. For each level of
+		 * recursion, a tuple must be written and then later read.
+		 */
+		pages = relation_byte_size(input_tuples, input_width) / BLCKSZ;
+		pages_written = pages_read = pages * depth;
+
+		startup_cost += pages_written * random_page_cost;
+		total_cost += pages_written * random_page_cost;
+		total_cost += pages_read * seq_page_cost;
 	}
 
 	/*
@@ -3303,7 +3370,7 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	 * Get hash table size that executor would use for inner relation.
 	 *
 	 * XXX for the moment, always assume that skew optimization will be
-	 * performed.  As long as SKEW_WORK_MEM_PERCENT is small, it's not worth
+	 * performed. As long as SKEW_HASH_MEM_PERCENT is small, it's not worth
 	 * trying to determine that for sure.
 	 *
 	 * XXX at some point it might be interesting to try to account for skew
@@ -3312,7 +3379,7 @@ initial_cost_hashjoin(PlannerInfo *root, JoinCostWorkspace *workspace,
 	ExecChooseHashTableSize(inner_path_rows_total,
 							inner_path->pathtarget->width,
 							true,	/* useskew */
-							parallel_hash,	/* try_combined_work_mem */
+							parallel_hash, /* try_combined_hash_mem */
 							outer_path->parallel_workers,
 							&space_allowed,
 							&numbuckets,
@@ -3493,16 +3560,15 @@ final_cost_hashjoin(PlannerInfo *root, HashPath *path,
 	}
 
 	/*
-	 * If the bucket holding the inner MCV would exceed work_mem, we don't
+	 * If the bucket holding the inner MCV would exceed hash_mem, we don't
 	 * want to hash unless there is really no other alternative, so apply
 	 * disable_cost.  (The executor normally copes with excessive memory usage
 	 * by splitting batches, but obviously it cannot separate equal values
-	 * that way, so it will be unable to drive the batch size below work_mem
+	 * that way, so it will be unable to drive the batch size below hash_mem
 	 * when this is true.)
 	 */
 	if (relation_byte_size(clamp_row_est(inner_path_rows * innermcvfreq),
-						   inner_path->pathtarget->width) >
-		(work_mem * 1024L))
+						   inner_path->pathtarget->width) > get_hash_memory_limit())
 		startup_cost += disable_cost;
 
 	/*

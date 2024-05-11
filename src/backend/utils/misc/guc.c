@@ -951,6 +951,26 @@ static struct config_bool ConfigureNamesBool[] =
 		NULL, NULL, NULL
 	},
 	{
+		{"enable_hashagg_disk", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enables the planner's use of hashed aggregation plans that are expected to exceed work_mem."),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&enable_hashagg_disk,
+		true,
+		NULL, NULL, NULL
+	},
+	{
+		{"enable_groupingsets_hash_disk", PGC_USERSET, QUERY_TUNING_METHOD,
+			gettext_noop("Enables the planner's use of hashed aggregation plans for groupingsets when the total size of the hash tables is expected to exceed work_mem."),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&enable_groupingsets_hash_disk,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"enable_material", PGC_USERSET, QUERY_TUNING_METHOD,
 			gettext_noop("Enables the planner's use of materialization."),
 			NULL,
@@ -3345,6 +3365,17 @@ static struct config_real ConfigureNamesReal[] =
 		},
 		&Geqo_seed,
 		0.0, 0.0, 1.0,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"hash_mem_multiplier", PGC_USERSET, RESOURCES_MEM,
+			gettext_noop("Multiple of work_mem to use for hash tables."),
+			NULL,
+			GUC_EXPLAIN
+		},
+		&hash_mem_multiplier,
+		1.0, 1.0, 1000.0,
 		NULL, NULL, NULL
 	},
 

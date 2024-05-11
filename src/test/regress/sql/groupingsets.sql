@@ -441,4 +441,83 @@ select v||'a', case when grouping(v||'a') = 1 then 1 else 0 end, count(*)
   from unnest(array[1,1], array['a','b']) u(i,v)
  group by rollup(i, v||'a') order by 1,3;
 
+-- Bug #16784
+CREATE TABLE bug_16784(i INT, j INT);
+ANALYZE bug_16784;
+ALTER TABLE bug_16784 SET (autovacuum_enabled = 'false');
+UPDATE pg_class SET reltuples = 10 WHERE relname='bug_16784';
+
+INSERT INTO bug_16784 SELECT g/10, g FROM generate_series(1,40) g;
+
+SET work_mem='64kB';
+
+explain (costs off) select * from
+  (values (1),(2)) v(a),
+  lateral (select v.a, i, j, count(*) from
+             bug_16784 group by cube(i,j)) s
+  order by v.a, i, j;
+select * from
+  (values (1),(2)) v(a),
+  lateral (select a, i, j, count(*) from
+             bug_16784 group by cube(i,j)) s
+  order by v.a, i, j;
+
+--
+-- Compare results between plans using sorting and plans using hash
+-- aggregation. Force spilling in both cases by setting work_mem low
+-- and turning on enable_groupingsets_hash_disk.
+--
+
+SET enable_groupingsets_hash_disk = true;
+SET work_mem='64kB';
+
+-- Produce results with sorting.
+
+set enable_hashagg = false;
+
+set jit_above_cost = 0;
+
+explain (costs off)
+select g100, g10, sum(g::numeric), count(*), max(g::text) from
+  (select g%1000 as g1000, g%100 as g100, g%10 as g10, g
+   from generate_series(0,1999) g) s
+group by cube (g1000, g100,g10);
+
+create table gs_group_1 as
+select g100, g10, sum(g::numeric), count(*), max(g::text) from
+  (select g%1000 as g1000, g%100 as g100, g%10 as g10, g
+   from generate_series(0,1999) g) s
+group by cube (g1000, g100,g10);
+
+-- Produce results with hash aggregation.
+
+set enable_hashagg = true;
+set enable_sort = false;
+
+explain (costs off)
+select g100, g10, sum(g::numeric), count(*), max(g::text) from
+  (select g%1000 as g1000, g%100 as g100, g%10 as g10, g
+   from generate_series(0,1999) g) s
+group by cube (g1000, g100,g10);
+
+create table gs_hash_1 as
+select g100, g10, sum(g::numeric), count(*), max(g::text) from
+  (select g%1000 as g1000, g%100 as g100, g%10 as g10, g
+   from generate_series(0,1999) g) s
+group by cube (g1000, g100,g10);
+
+set enable_sort = true;
+set work_mem to default;
+
+-- Compare results
+
+(select * from gs_hash_1 except select * from gs_group_1)
+  union all
+(select * from gs_group_1 except select * from gs_hash_1);
+
+drop table gs_group_1;
+drop table gs_hash_1;
+
+SET enable_groupingsets_hash_disk TO DEFAULT;
+
 -- end
